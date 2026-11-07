@@ -73,3 +73,46 @@ def test_cli_source_only(tmp_path):
                        capture_output=True, text=True)
     assert r.returncode == 1, r.stdout + r.stderr
     assert "conflicting" in r.stdout
+
+
+def test_xlsx_files_can_be_compared(tmp_path):
+    before = pd.DataFrame({"id": [1, 2, 3], "amount": [10.0, 20.0, 30.0]})
+    after = pd.DataFrame({"id": [1, 2, 3], "amount": [10.0, 20.0, 99.0]})
+    b, a = tmp_path / "before.xlsx", tmp_path / "after.xlsx"
+    before.to_excel(b, index=False)
+    after.to_excel(a, index=False)
+    res = pipeverify.verify(str(b), str(a), key="id")
+    assert ("changed_values", "block") in kinds(res)  # 1 of 3 rows changed
+
+
+def test_xlsx_named_sheet(tmp_path):
+    frame = pd.DataFrame({"id": [1, 2], "amount": [10.0, 20.0]})
+    b, a = tmp_path / "before.xlsx", tmp_path / "after.xlsx"
+    frame.to_excel(b, index=False)                  # first sheet
+    frame.to_excel(a, index=False, sheet_name="Sheet2")
+    res = pipeverify.verify(str(b), f"{a}#Sheet2", key="id")
+    assert res.verdict == "pass"
+    assert res.stats["rows_after"] == 2
+
+
+def test_xlsx_cli_compare(tmp_path):
+    b, a = tmp_path / "before.xlsx", tmp_path / "after.xlsx"
+    pd.DataFrame({"id": [1], "amount": [10.0]}).to_excel(b, index=False)
+    pd.DataFrame({"id": [1], "amount": [20.0]}).to_excel(a, index=False)
+    r = subprocess.run([sys.executable, "-m", "pipeverify.cli", "compare", str(b), str(a), "-k", "id"],
+                       capture_output=True, text=True)
+    assert r.returncode == 1, r.stdout + r.stderr  # every value changed -> block
+    assert "changed" in r.stdout
+
+
+def test_xlsx_compressed_is_rejected(tmp_path):
+    import gzip
+    import shutil
+
+    a = tmp_path / "after.xlsx"
+    pd.DataFrame({"id": [1], "amount": [10.0]}).to_excel(a, index=False)
+    gz = tmp_path / "after.xlsx.gz"
+    with open(a, "rb") as fin, gzip.open(gz, "wb") as fout:
+        shutil.copyfileobj(fin, fout)
+    with pytest.raises(ValueError, match="Compressed Excel"):
+        pipeverify.verify(str(a), str(gz), key="id")

@@ -18,6 +18,7 @@ FILE_READERS = {
     ".json": "read_json_auto",
     ".jsonl": "read_json_auto",
     ".ndjson": "read_json_auto",
+    ".xlsx": "read_xlsx",
 }
 
 
@@ -107,6 +108,17 @@ def _split_extension(path: str) -> tuple[str, str]:
     return ext, ""
 
 
+def _ensure_excel_extension(con: duckdb.DuckDBPyConnection) -> None:
+    """Make the DuckDB excel extension available on this connection."""
+    try:
+        con.execute("INSTALL excel")
+        con.execute("LOAD excel")
+    except Exception as exc:
+        raise SourceError(
+            "Reading .xlsx files needs the DuckDB 'excel' extension, which could not be "
+            f"installed or loaded (is the machine offline?): {exc}") from exc
+
+
 def load(con: duckdb.DuckDBPyConnection, source: Source, name: str) -> None:
     """Materialize a source as table `name` in the DuckDB connection."""
     if source.kind == "dataframe":
@@ -116,6 +128,12 @@ def load(con: duckdb.DuckDBPyConnection, source: Source, name: str) -> None:
         return
     if source.kind == "file":
         path = source.path or ""
+        sheet = None
+        if "#" in path:
+            # optional sheet name for Excel workbooks, e.g. data/rates.xlsx#Sheet2
+            stripped, _, maybe_sheet = path.partition("#")
+            if os.path.splitext(stripped.lower())[1] == ".xlsx":
+                path, sheet = stripped, (maybe_sheet.strip() or None)
         if not os.path.exists(path):
             raise SourceError(f"File not found: {path}")
         ext, compression = _split_extension(path)
@@ -123,11 +141,19 @@ def load(con: duckdb.DuckDBPyConnection, source: Source, name: str) -> None:
         if reader is None:
             raise SourceError(
                 f"Unsupported file type '{ext}{compression}'. "
-                "Use csv, parquet or json, optionally compressed with .gz or .zst.")
+                "Use csv, parquet, json or xlsx, optionally compressed with .gz or .zst.")
         if compression and reader == "read_parquet":
             raise SourceError(
                 f"Compressed Parquet ('{ext}{compression}') is not supported. Parquet is already "
                 f"compressed internally, so use the plain {ext} file.")
+        if compression and reader == "read_xlsx":
+            raise SourceError(
+                f"Compressed Excel ('{ext}{compression}') is not supported. Use the plain {ext} file.")
+        if reader == "read_xlsx":
+            _ensure_excel_extension(con)
+            sheet_sql = f", sheet='{sheet.replace(chr(39), chr(39) * 2)}'" if sheet else ""
+            con.execute(f'CREATE OR REPLACE TABLE "{name}" AS SELECT * FROM read_xlsx(?{sheet_sql})', [path])
+            return
         con.execute(f'CREATE OR REPLACE TABLE "{name}" AS SELECT * FROM {reader}(?)', [path])
         return
     if source.kind == "duckdb":
